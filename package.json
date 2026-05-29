@@ -1,9 +1,10 @@
 {
-  "name": "philpapers-mcp",
-  "version": "0.2.0",
-  "description": "MCP server for PhilPapers / PhilArchive — search philosophy papers, fetch metadata, list recent submissions, and download open-access PDFs. No API key required.",
+  "name": "philosophy-mcp",
+  "version": "0.3.0",
+  "description": "MCP server for philosophy texts — PhilPapers/PhilArchive scholarship plus public-domain classics (Project Gutenberg, Internet Archive, Wikisource), open-access books (DOAB), modern editions (Open Library), and the Stanford Encyclopedia of Philosophy. No API key required.",
   "type": "module",
   "bin": {
+    "philosophy-mcp": "dist/index.js",
     "philpapers-mcp": "dist/index.js"
   },
   "main": "dist/index.js",
@@ -24,7 +25,13 @@
     "philosophy",
     "philpapers",
     "philarchive",
-    "openalex"
+    "openalex",
+    "project-gutenberg",
+    "internet-archive",
+    "wikisource",
+    "open-library",
+    "doab",
+    "stanford-encyclopedia"
   ],
   "author": "sea9401",
   "license": "MIT",

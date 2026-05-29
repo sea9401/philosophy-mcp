@@ -1,16 +1,26 @@
-# philpapers-mcp
+# philosophy-mcp
 
 [![CI](https://github.com/sea9401/philpapers-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/sea9401/philpapers-mcp/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/philpapers-mcp.svg)](https://www.npmjs.com/package/philpapers-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An MCP server wired to **PhilPapers / PhilArchive** — the philosophy preprint archive
-(the field's closest analog to arXiv). It lets an MCP client search philosophy papers,
-read their metadata and abstracts, browse recent submissions, and download open-access PDFs.
+An MCP server for **philosophy texts** — both current scholarship and the canon.
+It folds two things into one keyless server:
+
+- **PhilPapers / PhilArchive** — the philosophy preprint archive (the field's closest
+  analog to arXiv): search papers, read abstracts, browse recent submissions, pull full text.
+- **Books, classics & reference** — public-domain originals and translations (Project
+  Gutenberg, Internet Archive, Wikisource), open-access academic books (DOAB), modern
+  editions (Open Library), and the Stanford Encyclopedia of Philosophy — plus a generic
+  `fetch_text` for any other source (Zeno.org, marxists.org, Standard Ebooks, …).
 
 **No API key required.** Everything runs against keyless public endpoints.
 
-## How it works
+> Renamed and expanded from **philpapers-mcp** (which covered only the PhilPapers tools).
+> The `philpapers-mcp` binary name still works as an alias.
+
+## Tools
+
+### Philosophy scholarship (PhilPapers / PhilArchive)
 
 | Tool | What it does | Backend |
 | --- | --- | --- |
@@ -24,42 +34,51 @@ read their metadata and abstracts, browse recent submissions, and download open-
 PhilArchive is the open-access archive built on the PhilPapers database, so a record id
 such as `BROTNO-9` resolves on both `philarchive.org` and `philpapers.org`.
 
-Why OpenAlex for search? PhilPapers' own JSON search API needs a (free) key and sits behind
-Cloudflare, and OAI-PMH is harvest-only (no keyword search). OpenAlex indexes ~80k PhilPapers
-works with full-text search, abstracts, and links straight back to the PhilArchive record and PDF.
+### Books, classics & reference
+
+| Tool | What it does | Source |
+| --- | --- | --- |
+| `search_gutenberg` / `get_gutenberg_text` | Find and read public-domain classics + out-of-copyright translations | Project Gutenberg (Gutendex, with a gutenberg.org fallback) |
+| `search_internet_archive` / `get_archive_text` | Find scanned, out-of-print works and read their OCR text | Internet Archive |
+| `search_wikisource` / `get_wikisource_text` | Find and read primary texts/translations in any language (en, de, ko, …) | Wikisource |
+| `search_openlibrary` | Modern editions & translations as metadata, with read/borrow links | Open Library |
+| `search_doab` | Peer-reviewed, fully open-access academic books (readable in full) | DOAB |
+| `search_sep` / `get_sep_entry` | Search and read the standard scholarly reference | Stanford Encyclopedia of Philosophy |
+| `fetch_text` | Readable plain text from **any** URL — the catch-all for sources without a dedicated tool | any site |
+
+All text-returning tools take `max_chars` (default 15000–18000) and truncate with a note —
+raise it to read further into a work.
 
 ## Example
 
-`search_papers` with `{ "query": "phenomenal consciousness higher-order", "open_access_only": true, "limit": 3 }`:
+`search_papers` with `{ "query": "phenomenal consciousness higher-order", "open_access_only": true, "limit": 2 }`:
 
 ```
-Found 1,806 match(es) in PhilPapers/PhilArchive; showing 3 (open-access only).
+Found 1,806 match(es) in PhilPapers/PhilArchive; showing 2 (open-access only).
 
-1. What Is Wrong with the No-Report Paradigm and How to Fix It (2019)
-   id: BLOWIW-2
-   authors: Ned Block
-   philarchive: https://philarchive.org/rec/BLOWIW-2
-   pdf: https://philpapers.org/archive/BLOWIW-2.pdf
-   doi: https://doi.org/10.1016/j.tics.2019.10.001
-2. The HOROR theory of phenomenal consciousness (2014)
+1. The HOROR theory of phenomenal consciousness (2014)
    id: BROTNO-9
    authors: Richard Brown
    philarchive: https://philarchive.org/rec/BROTNO-9
    pdf: https://philpapers.org/archive/BROTNO-9.pdf
-   doi: https://doi.org/10.1007/s11098-014-0388-7
-...
 ```
 
-Then `get_fulltext` with `{ "id": "BROTNO-9" }` returns the paper's extracted full text (e.g. *"14 page(s), 38,302 chars"*), or `fetch_pdf` saves the PDF locally for the client to read.
+Then `get_fulltext` with `{ "id": "BROTNO-9" }` returns the paper's extracted full text.
 
-For a ready-to-read digest in one call, `research` with `{ "query": "HOROR higher-order consciousness", "limit": 2 }` returns each hit with its **verbatim full abstract** and subjects — no per-paper `get_paper` follow-ups needed.
+For the canon: `search_gutenberg` with `{ "query": "kant critique", "languages": "en" }` returns book
+ids, and `get_gutenberg_text` with `{ "book_id": 4280 }` reads *The Critique of Pure Reason* directly;
+`search_sep` → `get_sep_entry` reads an encyclopedia entry; `fetch_text` pulls readable text from
+German originals on Zeno.org or translations on marxists.org.
+
+> 20th-century authors still in copyright (Heidegger, Adorno, Gadamer, Habermas) won't have free
+> full texts here — you'll get metadata, SEP coverage, and read/borrow links.
 
 ## Setup
 
-Once published to npm, no clone or build is needed — run it straight with `npx`:
+Run straight with `npx` (no clone, once published):
 
 ```bash
-npx -y philpapers-mcp
+npx -y philosophy-mcp
 ```
 
 Or from source:
@@ -74,16 +93,16 @@ npm install   # the `prepare` hook builds dist/ automatically
 
 ```bash
 # via npx (no clone)
-claude mcp add philpapers -- npx -y philpapers-mcp
+claude mcp add philosophy -- npx -y philosophy-mcp
 
 # from a local build
-claude mcp add philpapers -- node /absolute/path/to/philpapers-mcp/dist/index.js
+claude mcp add philosophy -- node /absolute/path/to/dist/index.js
 
 # optional: identify yourself to OpenAlex's "polite pool" for better rate limits
-claude mcp add philpapers -e OPENALEX_MAILTO=you@example.com -- npx -y philpapers-mcp
+claude mcp add philosophy -e OPENALEX_MAILTO=you@example.com -- npx -y philosophy-mcp
 ```
 
-Then `/mcp` inside Claude Code should list `philpapers` with its four tools.
+Then `/mcp` inside Claude Code lists `philosophy` with its tools.
 
 ## Register with Claude Desktop
 
@@ -92,7 +111,7 @@ Add to `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "philpapers": {
+    "philosophy": {
       "command": "node",
       "args": ["/home/sea9401/philpapers-mcp/dist/index.js"],
       "env": { "OPENALEX_MAILTO": "you@example.com" }
@@ -114,19 +133,19 @@ Add to `claude_desktop_config.json`:
 node test-client.mjs
 ```
 
-Spawns the server over stdio and exercises all four tools.
+Spawns the server over stdio and exercises the PhilPapers tools.
 
 ## Notes & limits
 
-- `search_papers` reaches both preprints and published papers that have a PhilPapers/PhilArchive
-  record. `open_access_only: true` keeps only those with a downloadable PhilArchive PDF.
-- `list_recent` filters on the OAI **datestamp** (when the record was added/updated), which can
-  differ from the paper's publication date shown in the listing. It returns only the first OAI
-  page (no resumption-token paging).
-- Not every record has an open-access PDF — many entries are metadata-only links to the published
-  version. `get_paper` reports PDF availability; `fetch_pdf` fails clearly when there isn't one.
-- Abstracts from `search_papers` are reconstructed from OpenAlex's inverted index; `get_paper`
-  returns the archive's verbatim abstract.
+- The book/reference tools are keyless and read-only. Search tools return compact lists; the
+  `get_*` / `fetch_text` tools return text truncated to `max_chars`.
+- **Gutendex** (the Project Gutenberg API host) is frequently overloaded; `search_gutenberg`
+  probes it briefly and falls back to gutenberg.org's OPDS feed. `get_gutenberg_text` reads the
+  text directly from gutenberg.org, so it works even when Gutendex is down.
+- **SEP** has no keyword API (its on-site search is JavaScript-driven), so `search_sep` matches
+  against the published entry index (`contents.html`) — i.e. title/topic matching.
+- `list_recent` filters on the OAI **datestamp**, returns only the first OAI page, and not every
+  record has an open-access PDF — `get_paper` reports availability; `fetch_pdf` fails clearly.
 
 ## Publishing (maintainers)
 
@@ -137,12 +156,10 @@ To publish a new version to npm:
 1. Add a repo secret `NPM_TOKEN` (an npm **Automation** access token) under
    *Settings → Secrets and variables → Actions*.
 2. Bump the version and tag: `npm version patch && git push --follow-tags`.
-3. Cut a GitHub Release — `.github/workflows/publish.yml` runs `npm publish`
-   (with provenance) automatically.
+3. Cut a GitHub Release — `.github/workflows/publish.yml` runs `npm publish` automatically.
 
 Or publish manually: `npm login` then `npm publish --access public`.
 
 ## License
 
 MIT
-
