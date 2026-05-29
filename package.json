@@ -37,12 +37,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sea9401/philpapers-mcp.git"
+    "url": "git+https://github.com/sea9401/philosophy-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/sea9401/philpapers-mcp/issues"
+    "url": "https://github.com/sea9401/philosophy-mcp/issues"
   },
-  "homepage": "https://github.com/sea9401/philpapers-mcp#readme",
+  "homepage": "https://github.com/sea9401/philosophy-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "fast-xml-parser": "^5.8.0",

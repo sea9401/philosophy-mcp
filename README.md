@@ -1,6 +1,6 @@
 # philosophy-mcp
 
-[![CI](https://github.com/sea9401/philpapers-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/sea9401/philpapers-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/sea9401/philosophy-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/sea9401/philosophy-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 An MCP server for **philosophy texts** — both current scholarship and the canon.
@@ -84,8 +84,8 @@ npx -y philosophy-mcp
 Or from source:
 
 ```bash
-git clone https://github.com/sea9401/philpapers-mcp
-cd philpapers-mcp
+git clone https://github.com/sea9401/philosophy-mcp
+cd philosophy-mcp
 npm install   # the `prepare` hook builds dist/ automatically
 ```
 
