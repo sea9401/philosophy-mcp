@@ -15,9 +15,11 @@ read their metadata and abstracts, browse recent submissions, and download open-
 | Tool | What it does | Backend |
 | --- | --- | --- |
 | `search_papers` | Keyword search (title/abstract/full text), returns metadata + PhilArchive links + PDF URL | OpenAlex, filtered to the PhilPapers Foundation source |
+| `research` | One-shot scan: search **and** pull each hit's verbatim full abstract + subjects in a single call | OpenAlex + OAI-PMH `GetRecord` |
 | `get_paper` | Canonical metadata + full abstract for one record id | PhilArchive OAI-PMH `GetRecord` |
 | `list_recent` | Records added/updated in a date window | PhilArchive OAI-PMH `ListRecords` |
 | `fetch_pdf` | Download a record's open-access PDF to disk, return the path | `philpapers.org/archive/<ID>.pdf` |
+| `get_fulltext` | Download the open-access PDF and return its **extracted full text** | PDF + `unpdf` text extraction |
 
 PhilArchive is the open-access archive built on the PhilPapers database, so a record id
 such as `BROTNO-9` resolves on both `philarchive.org` and `philpapers.org`.
@@ -48,7 +50,9 @@ Found 1,806 match(es) in PhilPapers/PhilArchive; showing 3 (open-access only).
 ...
 ```
 
-Then `fetch_pdf` with `{ "id": "BROTNO-9" }` downloads the PDF locally so the client can read it.
+Then `get_fulltext` with `{ "id": "BROTNO-9" }` returns the paper's extracted full text (e.g. *"14 page(s), 38,302 chars"*), or `fetch_pdf` saves the PDF locally for the client to read.
+
+For a ready-to-read digest in one call, `research` with `{ "query": "HOROR higher-order consciousness", "limit": 2 }` returns each hit with its **verbatim full abstract** and subjects — no per-paper `get_paper` follow-ups needed.
 
 ## Setup
 

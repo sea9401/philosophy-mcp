@@ -24,8 +24,14 @@ const call = async (name, args) => {
 sep("search_papers (phenomenal consciousness, oa-only, 3)");
 await call("search_papers", { query: "phenomenal consciousness higher-order", limit: 3, open_access_only: true });
 
+sep("research (HOROR theory, 2)");
+await call("research", { query: "HOROR higher-order representation consciousness", limit: 2 });
+
 sep("get_paper (BROTNO-9)");
 await call("get_paper", { id: "https://philarchive.org/rec/BROTNO-9" });
+
+sep("get_fulltext (BROTNO-9, 1500 chars)");
+await call("get_fulltext", { id: "BROTNO-9", max_chars: 1500 });
 
 sep("list_recent (last 3 days, 3)");
 const from = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
