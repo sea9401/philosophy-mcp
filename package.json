@@ -1,0 +1,40 @@
+{
+  "name": "philpapers-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for PhilPapers / PhilArchive — search philosophy papers, fetch metadata, list recent submissions, and download open-access PDFs. No API key required.",
+  "type": "module",
+  "bin": {
+    "philpapers-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/index.js",
+    "start": "node dist/index.js",
+    "prepare": "npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "philosophy",
+    "philpapers",
+    "philarchive",
+    "openalex"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "fast-xml-parser": "^5.8.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.41",
+    "typescript": "^5.9.3"
+  }
+}
