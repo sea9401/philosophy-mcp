@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * PhilPapers / PhilArchive MCP server.
+ * Philosophy MCP server.
  *
- * Backends (all keyless):
+ * PhilPapers / PhilArchive scholarship (all keyless):
  *   - Keyword search  -> OpenAlex, filtered to the PhilPapers/PhilArchive source.
  *   - Record metadata -> PhilArchive OAI-PMH (GetRecord).
  *   - Recent papers   -> PhilArchive OAI-PMH (ListRecords, by date).
@@ -10,6 +10,10 @@
  *
  * PhilArchive is the open-access archive built on the PhilPapers database, so a
  * PhilPapers record id (e.g. "BROTNO-9") resolves on both hosts.
+ *
+ * Book & reference tools (Gutenberg, Internet Archive, Wikisource, Open Library,
+ * DOAB, Stanford Encyclopedia, and a generic fetch_text) live in ./books.ts and
+ * are attached below via registerBookTools().
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -20,6 +24,8 @@ import { z } from "zod";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+import { registerBookTools } from "./books.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -286,7 +292,7 @@ async function downloadPdf(recId: string): Promise<Buffer> {
 // Server + tools
 // ---------------------------------------------------------------------------
 
-const server = new McpServer({ name: "philpapers", version: "0.2.0" });
+const server = new McpServer({ name: "philosophy", version: "0.3.0" });
 
 server.registerTool(
   "search_papers",
@@ -621,6 +627,10 @@ server.registerTool(
   },
 );
 
+// Book & reference tools (Gutenberg, Internet Archive, Wikisource, Open Library,
+// DOAB, Stanford Encyclopedia, fetch_text).
+registerBookTools(server);
+
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
@@ -629,7 +639,7 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // stdout is the protocol channel — log only to stderr.
-  console.error("philpapers-mcp running on stdio");
+  console.error("philosophy-mcp running on stdio");
 }
 
 main().catch((e) => {
