@@ -26,8 +26,16 @@
     "philarchive",
     "openalex"
   ],
-  "author": "",
+  "author": "sea9401",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sea9401/philpapers-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sea9401/philpapers-mcp/issues"
+  },
+  "homepage": "https://github.com/sea9401/philpapers-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "fast-xml-parser": "^5.8.0",
