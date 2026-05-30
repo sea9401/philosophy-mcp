@@ -1,6 +1,6 @@
 {
   "name": "philosophy-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "MCP server for philosophy texts — PhilPapers/PhilArchive scholarship plus public-domain classics (Project Gutenberg, Internet Archive, Wikisource), open-access books (DOAB), modern editions (Open Library), and the Stanford Encyclopedia of Philosophy. No API key required.",
   "type": "module",
   "bin": {
@@ -14,6 +14,8 @@
   "scripts": {
     "build": "tsc && chmod +x dist/index.js",
     "start": "node dist/index.js",
+    "test": "npm run build && node smoke-test.mjs",
+    "smoke": "node smoke-test.mjs",
     "prepare": "npm run build"
   },
   "engines": {

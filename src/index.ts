@@ -26,6 +26,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { registerBookTools } from "./books.js";
+import { registerLocalTools } from "./local.js";
+import { LruCache, windowText, windowNote, pastEndNote } from "./textwindow.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -60,7 +62,17 @@ function asArray<T>(v: T | T[] | undefined | null): T[] {
   return Array.isArray(v) ? v : [v];
 }
 
-async function httpGet(url: string, init: RequestInit = {}): Promise<Response> {
+/**
+ * GET `url` and consume its body within a single abort timer. The `read`
+ * callback reads the Response (json/text/arrayBuffer) while the timer is still
+ * armed, so a server that sends headers and then stalls the body can't hang past
+ * HTTP_TIMEOUT_MS — the old version cleared the timer as soon as headers arrived.
+ */
+async function httpRequest<T>(
+  url: string,
+  read: (res: Response) => Promise<T>,
+  init: RequestInit = {},
+): Promise<T> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
   try {
@@ -70,7 +82,7 @@ async function httpGet(url: string, init: RequestInit = {}): Promise<Response> {
       headers: { "User-Agent": USER_AGENT, ...(init.headers ?? {}) },
     });
     if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText} — ${url}`);
-    return res;
+    return await read(res); // body read happens inside the timeout window
   } finally {
     clearTimeout(timer);
   }
@@ -84,6 +96,23 @@ function normalizeRecId(input: string): string {
   s = s.replace(/^oai:philarchive\.org\/rec\//i, "");
   s = s.replace(/\.pdf$/i, "");
   return s;
+}
+
+/**
+ * PhilArchive record ids are short alphanumeric-plus-hyphen codes (e.g.
+ * "BROTNO-9"). Validate a client-supplied id against an allowlist before using
+ * it in a filesystem path or an upstream URL, so it can't carry "../" path
+ * traversal or other surprises into fetch_pdf / downloadPdf.
+ */
+const REC_ID_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
+function assertSafeRecId(recId: string): string {
+  if (!REC_ID_RE.test(recId)) {
+    throw new Error(
+      `Invalid PhilArchive record id "${recId}" — expected letters, digits, and ` +
+        `hyphens only (e.g. "BROTNO-9").`,
+    );
+  }
+  return recId;
 }
 
 /** OpenAlex stores abstracts as an inverted index; rebuild the running text. */
@@ -162,8 +191,7 @@ async function openAlexSearch(
   );
   url.searchParams.set("mailto", MAILTO);
 
-  const res = await httpGet(url.toString());
-  const data: any = await res.json();
+  const data: any = await httpRequest(url.toString(), (r) => r.json());
   const total: number = data?.meta?.count ?? 0;
 
   let hits: Hit[] = asArray<any>(data.results).map((w) => {
@@ -194,8 +222,7 @@ async function openAlexSearch(
 async function oaiRequest(params: Record<string, string>): Promise<any> {
   const url = new URL(OAI_BASE);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  const res = await httpGet(url.toString());
-  const body = await res.text();
+  const body = await httpRequest(url.toString(), (r) => r.text());
   const root = xml.parse(body);
   const oai = root["OAI-PMH"];
   if (!oai) throw new Error("Malformed OAI-PMH response (no OAI-PMH root).");
@@ -277,22 +304,23 @@ async function headPdfExists(recId: string): Promise<boolean> {
 /** Download a record's open-access PDF; throws clearly when there isn't one. */
 async function downloadPdf(recId: string): Promise<Buffer> {
   const pdfUrl = `${PDF_BASE}/${recId}.pdf`;
-  const res = await httpGet(pdfUrl);
-  const ct = res.headers.get("content-type") || "";
-  if (!ct.includes("pdf")) {
-    throw new Error(
-      `No open-access PDF for "${recId}" (server returned content-type "${ct}"). ` +
-        `The paper may not be open access on PhilArchive.`,
-    );
-  }
-  return Buffer.from(await res.arrayBuffer());
+  return httpRequest(pdfUrl, async (res) => {
+    const ct = res.headers.get("content-type") || "";
+    if (!ct.includes("pdf")) {
+      throw new Error(
+        `No open-access PDF for "${recId}" (server returned content-type "${ct}"). ` +
+          `The paper may not be open access on PhilArchive.`,
+      );
+    }
+    return Buffer.from(await res.arrayBuffer());
+  });
 }
 
 // ---------------------------------------------------------------------------
 // Server + tools
 // ---------------------------------------------------------------------------
 
-const server = new McpServer({ name: "philosophy", version: "0.3.0" });
+const server = new McpServer({ name: "philosophy", version: "0.4.0" });
 
 server.registerTool(
   "search_papers",
@@ -452,7 +480,7 @@ server.registerTool(
   },
   async ({ id }) => {
     try {
-      const recId = normalizeRecId(id);
+      const recId = assertSafeRecId(normalizeRecId(id));
       const meta = await fetchOaiMeta(recId);
       if (!meta) return fail(`No record found for id "${recId}".`);
       if (meta.deleted) return fail(`Record "${recId}" is marked deleted in PhilArchive.`);
@@ -547,24 +575,22 @@ server.registerTool(
   {
     title: "Download paper PDF",
     description:
-      "Download the open-access PDF of a PhilArchive record and save it locally, returning " +
-      "the file path so it can be read. Accepts a record id or URL. Fails clearly if the " +
-      "paper has no open-access PDF. To get the text directly instead of a file, use get_fulltext.",
+      "Download the open-access PDF of a PhilArchive record and save it into the server's " +
+      "download directory (set via the PHILPAPERS_DOWNLOAD_DIR env var), returning the file " +
+      "path so it can be read. Accepts a record id or URL. Fails clearly if the paper has no " +
+      "open-access PDF. To get the text directly instead of a file, use get_fulltext.",
     inputSchema: {
       id: z.string().min(1).describe("PhilArchive record id or URL, e.g. 'BROTNO-9'."),
-      dest_dir: z
-        .string()
-        .optional()
-        .describe(`Directory to save into. Default: ${DOWNLOAD_DIR}`),
     },
   },
-  async ({ id, dest_dir }) => {
+  async ({ id }) => {
     try {
-      const recId = normalizeRecId(id);
+      const recId = assertSafeRecId(normalizeRecId(id));
       const buf = await downloadPdf(recId);
-      const dir = dest_dir || DOWNLOAD_DIR;
-      await mkdir(dir, { recursive: true });
-      const file = join(dir, `${recId}.pdf`);
+      // Always save inside the server-configured download dir — the client can't
+      // choose an arbitrary destination path.
+      await mkdir(DOWNLOAD_DIR, { recursive: true });
+      const file = join(DOWNLOAD_DIR, `${recId}.pdf`);
       await writeFile(file, buf);
       return ok(
         [
@@ -580,47 +606,76 @@ server.registerTool(
   },
 );
 
+/**
+ * Cache of extracted PDF bodies, keyed by record id. Extraction (download +
+ * unpdf parse) is the expensive part, so paging through a paper with offset=
+ * reuses the parse instead of re-downloading the whole PDF each call.
+ */
+const fulltextCache = new LruCache<{ text: string; totalPages: number }>(8);
+
 server.registerTool(
   "get_fulltext",
   {
     title: "Get paper full text",
     description:
-      "Download a PhilArchive record's open-access PDF and extract its full text, returned " +
-      "directly (no file needed). Accepts a record id or URL. Long papers are truncated to " +
-      "`max_chars`. Fails clearly if the paper has no open-access PDF.",
+      "Download a PhilArchive record's open-access PDF and extract its full text. Accepts a record " +
+      "id or URL. Returns one window of max_chars starting at offset (default the first 15000 chars); " +
+      "for a long paper, read a window and continue with the offset reported in the footer instead of " +
+      "pulling the whole thing at once. The extracted text is cached, so paging doesn't re-download. " +
+      "Fails clearly if the paper has no open-access PDF.",
     inputSchema: {
       id: z.string().min(1).describe("PhilArchive record id or URL, e.g. 'BROTNO-9'."),
       max_chars: z
         .number()
         .int()
-        .min(1000)
-        .max(500_000)
-        .default(50_000)
-        .describe("Max characters of extracted text to return (default 50000)."),
+        .min(500)
+        .max(200_000)
+        .default(15_000)
+        .describe("Max characters of extracted text to return in this window (default 15000)."),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .default(0)
+        .describe(
+          "Character offset to start from (default 0). Continue a long paper with the offset " +
+            "reported in the previous call's footer — avoids re-sending earlier text.",
+        ),
     },
   },
-  async ({ id, max_chars }) => {
+  async ({ id, max_chars, offset }) => {
     try {
-      const recId = normalizeRecId(id);
-      const buf = await downloadPdf(recId);
-      const pdf = await getDocumentProxy(new Uint8Array(buf));
-      const extracted = await extractText(pdf, { mergePages: true });
-      const totalPages: number = (extracted as any).totalPages ?? 0;
-      const raw = (extracted as any).text;
-      let text = (Array.isArray(raw) ? raw.join("\n\n") : String(raw ?? ""))
-        .replace(/[ \t]+\n/g, "\n")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim();
+      const recId = assertSafeRecId(normalizeRecId(id));
+      let entry = fulltextCache.get(recId);
+      if (!entry) {
+        const buf = await downloadPdf(recId);
+        const pdf = await getDocumentProxy(new Uint8Array(buf));
+        const extracted = await extractText(pdf, { mergePages: true });
+        const totalPages: number = (extracted as any).totalPages ?? 0;
+        const raw = (extracted as any).text;
+        const text = (Array.isArray(raw) ? raw.join("\n\n") : String(raw ?? ""))
+          .replace(/[ \t]+\n/g, "\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim();
+        entry = { text, totalPages };
+        fulltextCache.set(recId, entry);
+      }
 
-      const fullLen = text.length;
-      const truncated = fullLen > max_chars;
-      if (truncated) text = text.slice(0, max_chars).trimEnd();
-
+      const source = `Source: ${PDF_BASE}/${recId}.pdf`;
+      if (entry.text.length === 0) {
+        return ok(
+          `Full text of "${recId}" — ${entry.totalPages} page(s).\n${source}\n\n` +
+            "(no extractable text — the PDF may be image-only)",
+        );
+      }
+      const w = windowText(entry.text, max_chars, offset);
+      if (w.slice === "") {
+        return ok(`Full text of "${recId}".\n${source}\n\n${pastEndNote(w.total, w.start)}`);
+      }
       const header =
-        `Full text of "${recId}" — ${totalPages} page(s), ${fullLen.toLocaleString()} chars` +
-        `${truncated ? ` (truncated to ${max_chars.toLocaleString()})` : ""}.\n` +
-        `Source: ${PDF_BASE}/${recId}.pdf`;
-      return ok([header, "", text || "(no extractable text — the PDF may be image-only)"].join("\n"));
+        `Full text of "${recId}" — ${entry.totalPages} page(s), ${w.total.toLocaleString()} chars total.\n` +
+        source;
+      return ok(`${header}\n\n${w.slice}${windowNote(w)}`);
     } catch (e: any) {
       return fail(`get_fulltext failed: ${e?.message ?? e}`);
     }
@@ -631,6 +686,10 @@ server.registerTool(
 // DOAB, Stanford Encyclopedia, fetch_text).
 registerBookTools(server);
 
+// Local document tools (info / search / read for large local PDFs & text files)
+// — work a long local file without loading it whole into context.
+registerLocalTools(server);
+
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
@@ -638,6 +697,11 @@ registerBookTools(server);
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // Keep the event loop alive on the stdio transport so the process doesn't exit
+  // right after connecting (which surfaces to clients as "Connection closed"),
+  // and shut down cleanly when the client disconnects (stdin EOF/close).
+  process.stdin.resume();
+  process.stdin.on("close", () => process.exit(0));
   // stdout is the protocol channel — log only to stderr.
   console.error("philosophy-mcp running on stdio");
 }

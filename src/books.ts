@@ -17,6 +17,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { XMLParser } from "fast-xml-parser";
 import { z } from "zod";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+import { LruCache, renderWindow } from "./textwindow.js";
 
 // ---------------------------------------------------------------------------
 // HTTP + text helpers
@@ -42,6 +45,91 @@ function asArr<T>(v: T | T[] | undefined | null): T[] {
   return Array.isArray(v) ? v : [v];
 }
 
+// ---------------------------------------------------------------------------
+// SSRF guard — used by the arbitrary-URL fetch_text tool
+// ---------------------------------------------------------------------------
+
+/** Block an IPv4 literal that is loopback, private, link-local (incl. the
+ *  169.254.169.254 cloud-metadata endpoint), CGNAT, or otherwise non-public. */
+function isBlockedIp4(ip: string): boolean {
+  const p = ip.split(".").map((n) => Number(n));
+  if (p.length !== 4 || p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+  const [a, b, c] = p;
+  if (a === 0) return true; // 0.0.0.0/8 "this host"
+  if (a === 10) return true; // 10/8 private
+  if (a === 127) return true; // loopback
+  if (a === 169 && b === 254) return true; // link-local incl. cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12 private
+  if (a === 192 && b === 168) return true; // 192.168/16 private
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64/10 CGNAT
+  if (a === 192 && b === 0 && c === 0) return true; // 192.0.0/24
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18/15 benchmarking
+  if (a >= 224) return true; // 224/4 multicast + 240/4 reserved
+  return false;
+}
+
+/** Block an IPv6 literal that is loopback, ULA, link-local, or an embedded
+ *  IPv4-mapped private address. */
+function isBlockedIp6(ip: string): boolean {
+  let s = ip.toLowerCase();
+  const pct = s.indexOf("%"); // strip zone id, e.g. fe80::1%eth0
+  if (pct !== -1) s = s.slice(0, pct);
+  if (s === "::1" || s === "::") return true; // loopback / unspecified
+  const mapped = s.match(/(?:::ffff:)(\d+\.\d+\.\d+\.\d+)$/); // ::ffff:1.2.3.4
+  if (mapped) return isBlockedIp4(mapped[1]);
+  const head = s.split(":")[0] ?? "";
+  if (/^fe[89ab]/.test(head)) return true; // fe80::/10 link-local
+  if (/^f[cd]/.test(head)) return true; // fc00::/7 unique-local
+  return false;
+}
+
+function isBlockedIp(ip: string): boolean {
+  const v = isIP(ip);
+  if (v === 4) return isBlockedIp4(ip);
+  if (v === 6) return isBlockedIp6(ip);
+  return true; // not a parseable IP → block
+}
+
+/**
+ * Reject anything that isn't a plain http(s) request to a public host, to reduce
+ * SSRF risk in fetch_text (which takes an arbitrary client URL). Blocks non-http
+ * schemes, localhost, and hosts that resolve to private/loopback/link-local/
+ * metadata addresses. A DNS lookup could still rebind between this check and the
+ * actual connection (a small TOCTOU window), but this closes the common direct
+ * vectors, and bookRequest re-runs the guard on every redirect hop.
+ */
+async function assertPublicUrl(raw: string): Promise<void> {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(`Invalid URL: ${raw}`);
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new Error(`Only http(s) URLs are allowed (got "${u.protocol}").`);
+  }
+  const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!host) throw new Error(`URL has no host: ${raw}`);
+  if (host === "localhost" || host.endsWith(".localhost")) {
+    throw new Error(`Refusing to fetch localhost.`);
+  }
+  if (isIP(host)) {
+    if (isBlockedIp(host)) throw new Error(`Refusing to fetch private/loopback address ${host}.`);
+    return;
+  }
+  let addrs: Array<{ address: string }>;
+  try {
+    addrs = await lookup(host, { all: true });
+  } catch {
+    throw new Error(`Could not resolve host "${host}".`);
+  }
+  for (const { address } of addrs) {
+    if (isBlockedIp(address)) {
+      throw new Error(`Refusing to fetch "${host}" — it resolves to non-public address ${address}.`);
+    }
+  }
+}
+
 function ok(text: string) {
   return { content: [{ type: "text" as const, text }] };
 }
@@ -52,6 +140,12 @@ function fail(text: string) {
 interface FetchOpts {
   retries?: number;
   timeoutMs?: number;
+  /**
+   * Optional per-URL guard (e.g. an SSRF check). When set, redirects are followed
+   * manually so the guard runs on every hop instead of trusting the platform to
+   * follow a redirect into a private address.
+   */
+  guard?: (url: string) => Promise<void>;
 }
 
 interface FetchResult {
@@ -67,16 +161,31 @@ interface FetchResult {
 async function bookRequest(url: string, opts: FetchOpts = {}): Promise<FetchResult> {
   const retries = opts.retries ?? 2;
   const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
+  const guard = opts.guard;
+  const MAX_HOPS = 5;
   let lastErr: unknown;
   for (let i = 0; i <= retries; i++) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const res = await fetch(url, {
-        signal: ctrl.signal,
-        redirect: "follow",
-        headers: { "User-Agent": BOOK_UA, "Accept-Language": "en,de,ko" },
-      });
+      // When guarded, follow redirects by hand so the guard runs on every hop.
+      let current = url;
+      let res: Response;
+      for (let hop = 0; ; hop++) {
+        if (guard) await guard(current);
+        res = await fetch(current, {
+          signal: ctrl.signal,
+          redirect: guard ? "manual" : "follow",
+          headers: { "User-Agent": BOOK_UA, "Accept-Language": "en,de,ko" },
+        });
+        const location = res.headers.get("location");
+        if (guard && res.status >= 300 && res.status < 400 && location) {
+          if (hop >= MAX_HOPS) throw new Error(`Too many redirects from ${url}`);
+          current = new URL(location, current).toString();
+          continue;
+        }
+        break;
+      }
       if (RETRY_STATUS.has(res.status) && i < retries) {
         lastErr = new Error(`HTTP ${res.status}`);
         await sleep(600 * (i + 1));
@@ -150,12 +259,23 @@ function htmlToText(html: string): string {
   return out.join("\n").trim();
 }
 
-function clip(text: string, maxChars: number): string {
-  const t = text.trim();
-  const max = Math.max(500, Math.min(maxChars, 200_000));
-  if (t.length <= max) return t;
-  return `${t.slice(0, max)}\n\n[... truncated — ${t.length - max} more characters. Increase max_chars to read further.]`;
-}
+/**
+ * Cache of fully-fetched/extracted bodies, keyed by source (e.g. "gut:1234",
+ * "ia:<id>", a URL). Lets a tool page through a long book with offset= without
+ * re-downloading it each call — the body is fetched once, then sliced.
+ */
+const bodyCache = new LruCache<string>(8);
+
+/** Shared `offset` input field for the read tools — keeps paging consistent. */
+const offsetField = z
+  .number()
+  .int()
+  .min(0)
+  .default(0)
+  .describe(
+    "Character offset to start from (default 0). For long texts, read a window then call " +
+      "again with the offset reported in the footer to continue — avoids re-sending earlier text.",
+  );
 
 // ---------------------------------------------------------------------------
 // Source-specific helpers
@@ -286,55 +406,57 @@ export function registerBookTools(server: McpServer): void {
       title: "Read a Project Gutenberg book",
       description:
         "Fetch the plain-text body of a Project Gutenberg book by numeric id (from search_gutenberg). " +
-        "Truncated to max_chars.",
+        "Returns one window of max_chars from offset; whole books are long, so read a window and " +
+        "page on with the offset in the footer. The downloaded body is cached, so paging is cheap.",
       inputSchema: {
         book_id: z.number().int().describe("Gutenberg book id."),
         max_chars: z.number().int().min(500).max(200_000).default(15_000).describe("Characters to return (default 15000)."),
+        offset: offsetField,
       },
     },
-    async ({ book_id, max_chars }) => {
+    async ({ book_id, max_chars, offset }) => {
       const bid = book_id;
-      const candidates = [
-        `https://www.gutenberg.org/cache/epub/${bid}/pg${bid}.txt`,
-        `https://www.gutenberg.org/files/${bid}/${bid}-0.txt`,
-        `https://www.gutenberg.org/ebooks/${bid}.txt.utf-8`,
-      ];
-      let body = "";
-      for (const u of candidates) {
-        try {
-          const t = await getText(u, { retries: 1 });
-          if (t && t.trim()) {
-            body = t;
-            break;
+      const key = `gut:${bid}`;
+      let body = bodyCache.get(key) ?? "";
+      if (!body) {
+        const candidates = [
+          `https://www.gutenberg.org/cache/epub/${bid}/pg${bid}.txt`,
+          `https://www.gutenberg.org/files/${bid}/${bid}-0.txt`,
+          `https://www.gutenberg.org/ebooks/${bid}.txt.utf-8`,
+        ];
+        for (const u of candidates) {
+          try {
+            const t = await getText(u, { retries: 1 });
+            if (t && t.trim()) {
+              body = t;
+              break;
+            }
+          } catch {
+            /* try next layout */
           }
-        } catch {
-          /* try next layout */
         }
-      }
-      let title = "";
-      if (!body.trim()) {
-        // last resort: Gutendex metadata -> its own text/plain link
-        try {
-          const meta = await getJson(`https://gutendex.com/books/${bid}`, GUTENDEX_OPTS);
-          title = meta.title ?? "";
-          const fmts: Record<string, string> = meta.formats ?? {};
-          const url = Object.entries(fmts).find(([k, v]) => k.startsWith("text/plain") && !v.endsWith(".zip"))?.[1];
-          if (url) body = await getText(url, { retries: 1 });
-        } catch {
-          /* ignore */
+        if (!body.trim()) {
+          // last resort: Gutendex metadata -> its own text/plain link
+          try {
+            const meta = await getJson(`https://gutendex.com/books/${bid}`, GUTENDEX_OPTS);
+            const fmts: Record<string, string> = meta.formats ?? {};
+            const url = Object.entries(fmts).find(([k, v]) => k.startsWith("text/plain") && !v.endsWith(".zip"))?.[1];
+            if (url) body = await getText(url, { retries: 1 });
+          } catch {
+            /* ignore */
+          }
         }
+        if (!body.trim()) {
+          return fail(
+            `Could not download plain text for Gutenberg id ${bid}. ` +
+              `Try the epub from search_gutenberg or https://www.gutenberg.org/ebooks/${bid}.`,
+          );
+        }
+        bodyCache.set(key, body);
       }
-      if (!body.trim()) {
-        return fail(
-          `Could not download plain text for Gutenberg id ${bid}. ` +
-            `Try the epub from search_gutenberg or https://www.gutenberg.org/ebooks/${bid}.`,
-        );
-      }
-      if (!title) {
-        const m = body.slice(0, 400).match(/Project Gutenberg eBook of (.+)/);
-        title = m ? m[1].trim() : `Gutenberg ${bid}`;
-      }
-      return ok(`# ${title} (Gutenberg ${bid})\n\n` + clip(body, max_chars));
+      const m = body.slice(0, 400).match(/Project Gutenberg eBook of (.+)/);
+      const title = m ? m[1].trim() : `Gutenberg ${bid}`;
+      return ok(renderWindow(`# ${title} (Gutenberg ${bid})`, body, max_chars, offset));
     },
   );
 
@@ -381,41 +503,54 @@ export function registerBookTools(server: McpServer): void {
       title: "Read Internet Archive OCR text",
       description:
         "Fetch the OCR full text of an Internet Archive item by identifier (from " +
-        "search_internet_archive). Truncated to max_chars.",
+        "search_internet_archive). Returns one window of max_chars from offset; scans are long, so " +
+        "read a window and page on with the offset in the footer. The text is cached after first fetch.",
       inputSchema: {
         identifier: z.string().min(1).describe("IA item identifier."),
         max_chars: z.number().int().min(500).max(200_000).default(15_000).describe("Characters to return."),
+        offset: offsetField,
       },
     },
-    async ({ identifier, max_chars }) => {
-      const candidates = [`https://archive.org/download/${identifier}/${identifier}_djvu.txt`];
-      try {
-        const meta = await getJson(`https://archive.org/metadata/${identifier}`);
-        for (const f of asArr<any>(meta.files)) {
-          const name = String(f.name ?? "");
-          const fmt = String(f.format ?? "").toLowerCase();
-          if (name.endsWith("_djvu.txt") || (name.endsWith(".txt") && fmt.includes("text"))) {
-            candidates.push(`https://archive.org/download/${identifier}/${encodeURIComponent(name)}`);
+    async ({ identifier, max_chars, offset }) => {
+      const key = `ia:${identifier}`;
+      let body = bodyCache.get(key) ?? "";
+      if (!body) {
+        const candidates = [`https://archive.org/download/${identifier}/${identifier}_djvu.txt`];
+        try {
+          const meta = await getJson(`https://archive.org/metadata/${identifier}`);
+          for (const f of asArr<any>(meta.files)) {
+            const name = String(f.name ?? "");
+            const fmt = String(f.format ?? "").toLowerCase();
+            if (name.endsWith("_djvu.txt") || (name.endsWith(".txt") && fmt.includes("text"))) {
+              candidates.push(`https://archive.org/download/${identifier}/${encodeURIComponent(name)}`);
+            }
+          }
+        } catch {
+          /* ignore — fall back to the conventional name */
+        }
+        const seen = new Set<string>();
+        for (const u of candidates) {
+          if (seen.has(u)) continue;
+          seen.add(u);
+          try {
+            const t = await getText(u, { retries: 1 });
+            if (t && t.trim()) {
+              body = t;
+              break;
+            }
+          } catch {
+            /* try next candidate */
           }
         }
-      } catch {
-        /* ignore — fall back to the conventional name */
-      }
-      const seen = new Set<string>();
-      for (const u of candidates) {
-        if (seen.has(u)) continue;
-        seen.add(u);
-        try {
-          const t = await getText(u, { retries: 1 });
-          if (t && t.trim()) return ok(`# Internet Archive: ${identifier}\n\n` + clip(t, max_chars));
-        } catch {
-          /* try next candidate */
+        if (!body.trim()) {
+          return fail(
+            `No OCR text file found for "${identifier}" (may be image-only or restricted). ` +
+              `Browse it at https://archive.org/details/${identifier}`,
+          );
         }
+        bodyCache.set(key, body);
       }
-      return fail(
-        `No OCR text file found for "${identifier}" (may be image-only or restricted). ` +
-          `Browse it at https://archive.org/details/${identifier}`,
-      );
+      return ok(renderWindow(`# Internet Archive: ${identifier}`, body, max_chars, offset));
     },
   );
 
@@ -459,26 +594,42 @@ export function registerBookTools(server: McpServer): void {
     "get_wikisource_text",
     {
       title: "Read a Wikisource page",
-      description: "Fetch the plain text of a Wikisource page by title (from search_wikisource). Truncated to max_chars.",
+      description:
+        "Fetch the plain text of a Wikisource page by title (from search_wikisource). Returns one " +
+        "window of max_chars from offset; page on with the offset in the footer. Cached after first fetch.",
       inputSchema: {
         title: z.string().min(1).describe("Exact page title."),
         lang: z.string().default("en").describe("Wikisource language subdomain."),
         max_chars: z.number().int().min(500).max(200_000).default(15_000).describe("Characters to return."),
+        offset: offsetField,
       },
     },
-    async ({ title, lang, max_chars }) => {
+    async ({ title, lang, max_chars, offset }) => {
+      const key = `ws:${lang}:${title}`;
       try {
-        const params = new URLSearchParams({
-          action: "query", prop: "extracts", explaintext: "1",
-          titles: title, format: "json", redirects: "1",
-        });
-        const data = await getJson(`https://${lang}.wikisource.org/w/api.php?${params.toString()}`);
-        const pages: Record<string, any> = data?.query?.pages ?? {};
-        for (const page of Object.values(pages)) {
-          const extract = String(page?.extract ?? "");
-          if (extract.trim()) return ok(`# ${page?.title ?? title} (Wikisource ${lang})\n\n` + clip(extract, max_chars));
+        let cached = bodyCache.get(key);
+        let pageTitle = title;
+        if (cached === undefined) {
+          const params = new URLSearchParams({
+            action: "query", prop: "extracts", explaintext: "1",
+            titles: title, format: "json", redirects: "1",
+          });
+          const data = await getJson(`https://${lang}.wikisource.org/w/api.php?${params.toString()}`);
+          const pages: Record<string, any> = data?.query?.pages ?? {};
+          for (const page of Object.values(pages)) {
+            const extract = String(page?.extract ?? "");
+            if (extract.trim()) {
+              cached = extract;
+              pageTitle = String(page?.title ?? title);
+              bodyCache.set(key, extract);
+              break;
+            }
+          }
+          if (cached === undefined) {
+            return fail(`No extractable text for "${title}" on ${lang}.wikisource. Verify the title via search_wikisource.`);
+          }
         }
-        return fail(`No extractable text for "${title}" on ${lang}.wikisource. Verify the title via search_wikisource.`);
+        return ok(renderWindow(`# ${pageTitle} (Wikisource ${lang})`, cached, max_chars, offset));
       } catch (e: any) {
         return fail(`Wikisource request failed: ${e?.message ?? e}`);
       }
@@ -610,20 +761,37 @@ export function registerBookTools(server: McpServer): void {
       title: "Read a Stanford Encyclopedia entry",
       description:
         "Fetch the text of a SEP entry. Accepts a slug (e.g. 'hegel'), a /entries/.. path, or a " +
-        "full URL. Truncated to max_chars.",
+        "full URL. Returns one window of max_chars from offset; SEP entries are long, so read a " +
+        "window and page on with the offset in the footer. Cached after first fetch.",
       inputSchema: {
         entry: z.string().min(1).describe("Entry slug, /entries/.. path, or full URL."),
-        max_chars: z.number().int().min(500).max(200_000).default(18_000).describe("Characters to return."),
+        max_chars: z.number().int().min(500).max(200_000).default(15_000).describe("Characters to return."),
+        offset: offsetField,
       },
     },
-    async ({ entry, max_chars }) => {
+    async ({ entry, max_chars, offset }) => {
       let url = "";
       try {
-        if (entry.startsWith("http")) url = entry;
-        else if (entry.startsWith("/")) url = new URL(entry, "https://plato.stanford.edu").toString();
-        else url = `https://plato.stanford.edu/entries/${entry.replace(/^\/|\/$/g, "")}/`;
-        const html = await getText(url);
-        return ok(`# SEP entry: ${url}\n\n` + clip(htmlToText(html), max_chars));
+        if (entry.startsWith("http")) {
+          // A full URL must point at SEP itself — don't let this tool fetch
+          // arbitrary hosts.
+          const u = new URL(entry);
+          if (u.protocol !== "https:" || u.hostname !== "plato.stanford.edu") {
+            return fail(`get_sep_entry only accepts https://plato.stanford.edu/... URLs (got "${entry}").`);
+          }
+          url = u.toString();
+        } else if (entry.startsWith("/")) {
+          url = new URL(entry, "https://plato.stanford.edu").toString();
+        } else {
+          url = `https://plato.stanford.edu/entries/${entry.replace(/^\/|\/$/g, "")}/`;
+        }
+        const key = `sep:${url}`;
+        let text = bodyCache.get(key);
+        if (text === undefined) {
+          text = htmlToText(await getText(url));
+          bodyCache.set(key, text);
+        }
+        return ok(renderWindow(`# SEP entry: ${url}`, text, max_chars, offset));
       } catch (e: any) {
         return fail(`Could not fetch SEP entry at ${url || entry}: ${e?.message ?? e}`);
       }
@@ -638,19 +806,26 @@ export function registerBookTools(server: McpServer): void {
       description:
         "Fetch any URL and return its readable text — the catch-all for sources without a " +
         "dedicated tool: Zeno.org and projekt-gutenberg.org (German originals), marxists.org " +
-        "(German Idealism to Frankfurt School translations), Standard Ebooks, a specific page, etc.",
+        "(German Idealism to Frankfurt School translations), Standard Ebooks, a specific page, etc. " +
+        "Returns one window of max_chars from offset; page on with the offset in the footer. Cached per URL.",
       inputSchema: {
         url: z.string().url().describe("The page or text-file URL."),
         max_chars: z.number().int().min(500).max(200_000).default(15_000).describe("Characters to return."),
+        offset: offsetField,
       },
     },
-    async ({ url, max_chars }) => {
+    async ({ url, max_chars, offset }) => {
       try {
-        const { contentType, body } = await bookRequest(url);
-        const text =
-          contentType.includes("html") || body.trimStart().startsWith("<") ? htmlToText(body) : body;
-        if (!text.trim()) return ok(`Fetched ${url} but found no readable text (binary or JS-only page?).`);
-        return ok(`# ${url}\n\n` + clip(text, max_chars));
+        const key = `url:${url}`;
+        let text = bodyCache.get(key);
+        if (text === undefined) {
+          const { contentType, body } = await bookRequest(url, { guard: assertPublicUrl });
+          text =
+            contentType.includes("html") || body.trimStart().startsWith("<") ? htmlToText(body) : body;
+          if (!text.trim()) return ok(`Fetched ${url} but found no readable text (binary or JS-only page?).`);
+          bodyCache.set(key, text);
+        }
+        return ok(renderWindow(`# ${url}`, text, max_chars, offset));
       } catch (e: any) {
         return fail(`Fetch failed for ${url}: ${e?.message ?? e}`);
       }
