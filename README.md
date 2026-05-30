@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 An MCP server for **philosophy texts** — both current scholarship and the canon.
-It folds two things into one keyless server:
+It folds these into one keyless server:
 
 - **PhilPapers / PhilArchive** — the philosophy preprint archive (the field's closest
   analog to arXiv): search papers, read abstracts, browse recent submissions, pull full text.
@@ -12,6 +12,8 @@ It folds two things into one keyless server:
   Gutenberg, Internet Archive, Wikisource), open-access academic books (DOAB), modern
   editions (Open Library), and the Stanford Encyclopedia of Philosophy — plus a generic
   `fetch_text` for any other source (Zeno.org, marxists.org, Standard Ebooks, …).
+- **Local documents** — open a large local PDF or text file and work it without loading the
+  whole thing into context: outline, in-file search, and paged reading.
 
 **No API key required.** Everything runs against keyless public endpoints.
 
@@ -46,8 +48,25 @@ such as `BROTNO-9` resolves on both `philarchive.org` and `philpapers.org`.
 | `search_sep` / `get_sep_entry` | Search and read the standard scholarly reference | Stanford Encyclopedia of Philosophy |
 | `fetch_text` | Readable plain text from **any** URL — the catch-all for sources without a dedicated tool | any site |
 
-All text-returning tools take `max_chars` (default 15000–18000) and truncate with a note —
-raise it to read further into a work.
+All text-returning tools (`get_fulltext`, the `get_*_text` readers, `get_sep_entry`,
+`fetch_text`) return **one window** — `max_chars` characters (default 15000) starting at
+`offset` (default 0). When the body is longer, the footer reports the next `offset` to
+continue from, so you page through a long work a window at a time instead of dumping it whole
+(and re-dumping from the start to read further). Each fetched/extracted body is cached, so
+paging doesn't re-download or re-parse the source.
+
+### Local documents
+
+| Tool | What it does |
+| --- | --- |
+| `local_doc_info` | Overview of a local PDF/text file — pages, characters, ~tokens, and a heuristic outline — without loading the whole file |
+| `local_doc_search` | Find passages by keyword/regex and return just the matching snippets with page numbers |
+| `local_doc_read` | Read a bounded page range / chunk, capped at `max_chars` so it can't flood context, reporting the next page to continue from |
+
+These read a large local file the way you'd skim a thick book — get an outline, jump to the
+relevant pages by searching, then read a chunk at a time — so only the parts that matter reach
+the context. Only files under `$HOME` are readable by default; add more roots via
+`PHILOSOPHY_DOC_ROOTS`.
 
 ## Example
 
@@ -126,19 +145,23 @@ Add to `claude_desktop_config.json`:
 | --- | --- | --- |
 | `OPENALEX_MAILTO` | `mcp@example.com` | Your email — joins OpenAlex's polite pool (recommended). |
 | `PHILPAPERS_DOWNLOAD_DIR` | `<tmp>/philpapers-mcp` | Where `fetch_pdf` saves files. |
+| `PHILOSOPHY_DOC_ROOTS` | `$HOME` | Extra roots the `local_doc_*` tools may read (delimiter-separated absolute paths). |
 
 ## Smoke test
 
 ```bash
-node test-client.mjs
+npm test   # builds, then runs smoke-test.mjs
 ```
 
-Spawns the server over stdio and exercises the PhilPapers tools.
+`smoke-test.mjs` spawns the server over stdio, performs the MCP handshake, and verifies every
+expected tool is registered — no network calls, so it's the regression guard CI runs. (The
+older `node test-client.mjs` additionally exercises a couple of live PhilPapers calls.)
 
 ## Notes & limits
 
 - The book/reference tools are keyless and read-only. Search tools return compact lists; the
-  `get_*` / `fetch_text` tools return text truncated to `max_chars`.
+  `get_*` / `fetch_text` tools return one `max_chars` window from `offset` and report the next
+  `offset` to continue — page through long works instead of pulling them whole.
 - **Gutendex** (the Project Gutenberg API host) is frequently overloaded; `search_gutenberg`
   probes it briefly and falls back to gutenberg.org's OPDS feed. `get_gutenberg_text` reads the
   text directly from gutenberg.org, so it works even when Gutendex is down.

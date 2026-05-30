@@ -31,6 +31,10 @@ const EXPECTED = [
   "search_sep",
   "get_sep_entry",
   "fetch_text",
+  // Local documents (src/local.ts)
+  "local_doc_info",
+  "local_doc_search",
+  "local_doc_read",
 ];
 
 const transport = new StdioClientTransport({
