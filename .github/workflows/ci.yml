@@ -21,5 +21,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: Verify committed dist/ is in sync with src/
+        run: |
+          git diff --exit-code -- dist \
+            || { echo "::error::dist/ is stale — run 'npm run build' and commit the dist/ changes."; exit 1; }
       - name: Smoke test (offline — server connects + tools/list)
         run: node smoke-test.mjs

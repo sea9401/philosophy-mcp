@@ -108,6 +108,19 @@ cd philosophy-mcp
 npm install   # the `prepare` hook builds dist/ automatically
 ```
 
+### Updating
+
+`dist/` is committed, so an existing source checkout updates with a plain pull — no build step:
+
+```bash
+cd philosophy-mcp
+git pull
+```
+
+Then **restart the MCP server** (reconnect in Claude Code, or restart Claude Desktop) so it
+loads the new build. Maintainers: rebuild and commit `dist/` whenever you change `src/` — CI
+fails if the two drift.
+
 ## Register with Claude Code
 
 ```bash

@@ -1,4 +1,6 @@
 node_modules/
-dist/
 *.log
 .DS_Store
+
+# dist/ is committed on purpose so existing source installs update with a plain
+# `git pull` (no build step). CI verifies it stays in sync with src/.
