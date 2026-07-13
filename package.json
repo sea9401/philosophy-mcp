@@ -12,7 +12,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js",
+    "build": "tsc && node --input-type=module -e \"import { chmodSync } from 'node:fs'; if (process.platform !== 'win32') chmodSync('dist/index.js', 0o755)\"",
     "start": "node dist/index.js",
     "test": "npm run build && node smoke-test.mjs",
     "smoke": "node smoke-test.mjs",
