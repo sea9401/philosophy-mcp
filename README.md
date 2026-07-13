@@ -131,7 +131,7 @@ claude mcp add philosophy -- npx -y philosophy-mcp
 claude mcp add philosophy -- node /absolute/path/to/dist/index.js
 
 # from a local build (Windows)
-claude mcp add philosophy -- node C:/Users/PATH/TO/philosophy-mcp/dist/index.js
+claude mcp add philosophy -- node "C:/Users/PATH/TO/philosophy-mcp/dist/index.js"
 
 # optional: identify yourself to OpenAlex's "polite pool" for better rate limits
 claude mcp add philosophy -e OPENALEX_MAILTO=you@example.com -- npx -y philosophy-mcp
