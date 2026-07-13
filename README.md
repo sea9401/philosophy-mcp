@@ -131,14 +131,14 @@ claude mcp add philosophy -- npx -y philosophy-mcp
 claude mcp add philosophy -- node /absolute/path/to/dist/index.js
 
 # from a local build (Windows)
-claude mcp add philosophy -- node "C:/Users/PATH/TO/philosophy-mcp/dist/index.js"
+claude mcp add philosophy -- node "C:/PATH/TO/philosophy-mcp/dist/index.js"
 
 # optional: identify yourself to OpenAlex's "polite pool" for better rate limits
 claude mcp add philosophy -e OPENALEX_MAILTO=you@example.com -- npx -y philosophy-mcp
 ```
 
 When you configure a local path on Windows, prefer forward slashes in JSON and command
-arguments, for example `C:/Users/PATH/TO/philosophy-mcp/dist/index.js`.
+arguments, for example `C:/PATH/TO/philosophy-mcp/dist/index.js`.
 
 Then `/mcp` inside Claude Code lists `philosophy` with its tools.
 
@@ -151,7 +151,7 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "philosophy": {
       "command": "node",
-      "args": ["C:/Users/PATH/TO/philosophy-mcp/dist/index.js"],
+      "args": ["/absolute/path/to/philosophy-mcp/dist/index.js"],
       "env": { "OPENALEX_MAILTO": "you@example.com" }
     }
   }
