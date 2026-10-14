@@ -40,7 +40,7 @@ such as `BROTNO-9` resolves on both `philarchive.org` and `philpapers.org`.
 
 | Tool | What it does | Source |
 | --- | --- | --- |
-| `search_gutenberg` / `get_gutenberg_text` | Find and read public-domain classics + out-of-copyright translations | Project Gutenberg (Gutendex, with a gutenberg.org fallback) |
+| `search_gutenberg` / `get_gutenberg_text` | Find and read public-domain classics + out-of-copyright translations | Project Gutenberg (Gutendex + official mirrors) |
 | `search_internet_archive` / `get_archive_text` | Find scanned, out-of-print works and read their OCR text | Internet Archive |
 | `search_wikisource` / `get_wikisource_text` | Find and read primary texts/translations in any language (en, de, ko, …) | Wikisource |
 | `search_openlibrary` | Modern editions & translations as metadata, with read/borrow links | Open Library |
@@ -175,9 +175,12 @@ older `node test-client.mjs` additionally exercises a couple of live PhilPapers 
 - The book/reference tools are keyless and read-only. Search tools return compact lists; the
   `get_*` / `fetch_text` tools return one `max_chars` window from `offset` and report the next
   `offset` to continue — page through long works instead of pulling them whole.
-- **Gutendex** (the Project Gutenberg API host) is frequently overloaded; `search_gutenberg`
-  probes it briefly and falls back to gutenberg.org's OPDS feed. `get_gutenberg_text` reads the
-  text directly from gutenberg.org, so it works even when Gutendex is down.
+- **Project Gutenberg**: gutenberg.org is for human users only and blocks automated access
+  ([robot policy](https://www.gutenberg.org/policy/robot_access.html)), so this server never
+  fetches from it. `get_gutenberg_text` downloads from official mirrors (ODU, XMission, PGLAF),
+  and `fetch_text` refuses gutenberg.org URLs. Gutendex is frequently overloaded; `search_gutenberg`
+  probes it briefly and falls back to the public-domain offline catalog (~6 MB, downloaded once
+  per session from a mirror).
 - **SEP** has no keyword API (its on-site search is JavaScript-driven), so `search_sep` matches
   against the published entry index (`contents.html`) — i.e. title/topic matching.
 - `list_recent` filters on the OAI **datestamp**, returns only the first OAI page, and not every

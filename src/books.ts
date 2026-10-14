@@ -5,7 +5,7 @@
  * server without touching its code. Registered via registerBookTools(server).
  *
  * Sources (all keyless):
- *   - Project Gutenberg  (Gutendex JSON, gutenberg.org OPDS fallback + direct text)
+ *   - Project Gutenberg  (Gutendex JSON, mirrored offline-catalog fallback + mirror text)
  *   - Internet Archive   (advancedsearch + OCR _djvu.txt)
  *   - Wikisource         (MediaWiki API, any language)
  *   - Open Library       (modern editions/translations metadata + read/borrow links)
@@ -15,11 +15,13 @@
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { XMLParser } from "fast-xml-parser";
 import { z } from "zod";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { gunzipSync } from "node:zlib";
 import { LruCache, renderWindow } from "./textwindow.js";
+import { GUTENBERG_CATALOG_URLS, catalogFromCsv, gutenbergTextUrls, isGutenbergSite, searchCatalog } from "./gutenberg.js";
+import type { CatalogBook } from "./gutenberg.js";
 
 // ---------------------------------------------------------------------------
 // HTTP + text helpers
@@ -30,13 +32,6 @@ import { LruCache, renderWindow } from "./textwindow.js";
 const BOOK_UA = "Mozilla/5.0 (compatible; philosophy-mcp/0.3; +research/educational)";
 const TIMEOUT_MS = 30_000;
 const RETRY_STATUS = new Set([429, 500, 502, 503, 504]);
-
-const atomXml = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: "@_",
-  removeNSPrefix: true,
-  trimValues: true,
-});
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -216,7 +211,7 @@ async function getJson(url: string, opts: FetchOpts = {}): Promise<any> {
 }
 
 // Gutendex (gutendex.com) is frequently overloaded; probe it fast and fall back
-// to the reliable gutenberg.org host rather than hanging on its timeout.
+// to the mirrored offline catalog rather than hanging on its timeout.
 const GUTENDEX_OPTS: FetchOpts = { retries: 0, timeoutMs: 8_000 };
 
 function decodeEntities(s: string): string {
@@ -281,32 +276,31 @@ const offsetField = z
 // Source-specific helpers
 // ---------------------------------------------------------------------------
 
-/** Fallback Gutenberg search via gutenberg.org's OPDS feed (when Gutendex is overloaded). */
-async function gutenbergOpds(terms: string, limit: number): Promise<Array<{ id: number; title: string; author: string }>> {
-  const body = await getText(`https://www.gutenberg.org/ebooks/search.opds/?query=${encodeURIComponent(terms)}`);
-  const root: any = atomXml.parse(body);
-  const items: Array<{ id: number; title: string; author: string }> = [];
-  for (const entry of asArr<any>(root?.feed?.entry)) {
-    const title = String(entry?.title ?? "").trim();
-    const authorRaw = entry?.author?.name;
-    const author = String(Array.isArray(authorRaw) ? authorRaw[0] : authorRaw ?? "").trim();
-    let bid: number | null = null;
-    for (const ln of asArr<any>(entry?.link)) {
-      const m = String(ln?.["@_href"] ?? "").match(/\/(?:ebooks|epub|files|cache\/epub)\/(\d+)/);
-      if (m) {
-        bid = parseInt(m[1], 10);
-        break;
+/**
+ * Fallback Gutenberg search (when Gutendex is overloaded): the public-domain
+ * offline catalog from a mirror, downloaded once (~6 MB gzipped) and kept for
+ * the life of the process. gutenberg.org itself bans automated access.
+ */
+let gutenbergCatalog: Promise<CatalogBook[]> | null = null;
+function getGutenbergCatalog(): Promise<CatalogBook[]> {
+  gutenbergCatalog ??= (async () => {
+    let lastErr: unknown;
+    for (const url of GUTENBERG_CATALOG_URLS) {
+      try {
+        const res = await fetch(url, { signal: AbortSignal.timeout(180_000), headers: { "User-Agent": BOOK_UA } });
+        if (!res.ok) throw new Error(`HTTP ${res.status} — ${url}`);
+        const csv = gunzipSync(Buffer.from(await res.arrayBuffer())).toString("utf8");
+        return catalogFromCsv(csv);
+      } catch (e) {
+        lastErr = e; // try the next mirror
       }
     }
-    if (bid === null) {
-      const m = String(entry?.id ?? "").match(/(\d+)/);
-      bid = m ? parseInt(m[1], 10) : null;
-    }
-    if (bid === null) continue; // skip facet/navigation entries
-    items.push({ id: bid, title, author });
-    if (items.length >= limit) break;
-  }
-  return items;
+    throw lastErr;
+  })().catch((e) => {
+    gutenbergCatalog = null; // let a later call retry
+    throw e;
+  });
+  return gutenbergCatalog;
 }
 
 /** Lazily-built, cached SEP entry index from the static contents page. */
@@ -379,23 +373,22 @@ export function registerBookTools(server: McpServer): void {
           return ok([`Project Gutenberg — ${data.count ?? 0} total match(es), showing ${results.length}:`, "", ...lines].join("\n"));
         }
       } catch {
-        // Gutendex is frequently overloaded — fall back to gutenberg.org OPDS.
+        // Gutendex is frequently overloaded — fall back to the mirrored offline catalog.
       }
-      const queryTerms = terms || topic;
-      if (!queryTerms) return fail("Provide a query, author, or topic to search Project Gutenberg.");
+      if (!terms && !topic) return fail("Provide a query, author, or topic to search Project Gutenberg.");
       try {
-        const items = await gutenbergOpds(queryTerms, limit);
+        const items = searchCatalog(await getGutenbergCatalog(), { terms, topic, languages, limit });
         if (!items.length) return ok("No Project Gutenberg matches.");
         const lines = items.map((b) =>
           [
             `• [${b.id}] ${b.title || "?"}`,
-            `   author: ${b.author || "—"}`,
+            `   author: ${b.authors || "—"} | lang: ${b.languages.join(",")}`,
             `   gutenberg: https://www.gutenberg.org/ebooks/${b.id}`,
           ].join("\n"),
         );
-        return ok([`Project Gutenberg (via gutenberg.org) — showing ${items.length}:`, "", ...lines].join("\n"));
+        return ok([`Project Gutenberg (offline catalog) — showing ${items.length}:`, "", ...lines].join("\n"));
       } catch (e: any) {
-        return fail(`Project Gutenberg unreachable (Gutendex down; gutenberg.org error: ${e?.message ?? e}).`);
+        return fail(`Project Gutenberg unreachable (Gutendex down; catalog mirror error: ${e?.message ?? e}).`);
       }
     },
   );
@@ -419,12 +412,8 @@ export function registerBookTools(server: McpServer): void {
       const key = `gut:${bid}`;
       let body = bodyCache.get(key) ?? "";
       if (!body) {
-        const candidates = [
-          `https://www.gutenberg.org/cache/epub/${bid}/pg${bid}.txt`,
-          `https://www.gutenberg.org/files/${bid}/${bid}-0.txt`,
-          `https://www.gutenberg.org/ebooks/${bid}.txt.utf-8`,
-        ];
-        for (const u of candidates) {
+        // Mirrors only — gutenberg.org blocks automated downloads.
+        for (const u of gutenbergTextUrls(bid)) {
           try {
             const t = await getText(u, { retries: 1 });
             if (t && t.trim()) {
@@ -432,18 +421,7 @@ export function registerBookTools(server: McpServer): void {
               break;
             }
           } catch {
-            /* try next layout */
-          }
-        }
-        if (!body.trim()) {
-          // last resort: Gutendex metadata -> its own text/plain link
-          try {
-            const meta = await getJson(`https://gutendex.com/books/${bid}`, GUTENDEX_OPTS);
-            const fmts: Record<string, string> = meta.formats ?? {};
-            const url = Object.entries(fmts).find(([k, v]) => k.startsWith("text/plain") && !v.endsWith(".zip"))?.[1];
-            if (url) body = await getText(url, { retries: 1 });
-          } catch {
-            /* ignore */
+            /* try next mirror/layout */
           }
         }
         if (!body.trim()) {
@@ -819,7 +797,14 @@ export function registerBookTools(server: McpServer): void {
         const key = `url:${url}`;
         let text = bodyCache.get(key);
         if (text === undefined) {
-          const { contentType, body } = await bookRequest(url, { guard: assertPublicUrl });
+          const { contentType, body } = await bookRequest(url, {
+            guard: async (u) => {
+              if (isGutenbergSite(u)) {
+                throw new Error("gutenberg.org blocks automated access — use get_gutenberg_text with the book id.");
+              }
+              await assertPublicUrl(u);
+            },
+          });
           text =
             contentType.includes("html") || body.trimStart().startsWith("<") ? htmlToText(body) : body;
           if (!text.trim()) return ok(`Fetched ${url} but found no readable text (binary or JS-only page?).`);
